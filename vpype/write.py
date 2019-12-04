@@ -177,9 +177,6 @@ def write_hpgl(vector_data: VectorData, output, size: Tuple[float, float]) -> No
     :param output: file object to write to
     :param size: size of the page in pixel
     """
-
-    print(size)
-
     # for plotters A2 and above we need to offset the coords (LL = -309, -210)
     offset = [-309, -210]
 
