@@ -1,5 +1,7 @@
 import copy
 import logging
+import os
+from typing import Tuple
 
 import click
 import svgwrite
@@ -21,13 +23,14 @@ PAGE_FORMATS = {
 }
 
 
+# noinspection PyShadowingBuiltins
 @cli.command(group="Output")
 @click.argument("output", type=click.File("w"))
 @click.option(
-    "-s",
-    "--single-path",
-    is_flag=True,
-    help="Generate a single compound path instead of individual paths.",
+    "-f",
+    "--format",
+    type=click.Choice(["svg", "hpgl"], case_sensitive=False),
+    help="Output format (inferred from file extension by default).",
 )
 @click.option(
     "-p",
@@ -51,14 +54,21 @@ PAGE_FORMATS = {
     is_flag=True,
     help="[--page-format only] Center the geometries within the SVG bounds",
 )
+@click.option(
+    "-s",
+    "--single-path",
+    is_flag=True,
+    help=" (SVG only) Generate a single compound path instead of individual paths.",
+)
 @global_processor
 def write(
     vector_data: VectorData,
     output,
-    single_path: bool,
+    format: str,
     page_format: str,
     landscape: bool,
     center: bool,
+    single_path: bool,
 ):
     """
     Save geometries to a SVG file.
@@ -75,7 +85,7 @@ def write(
         logging.warning("no geometry to save, no file created")
         return vector_data
 
-    # compute bounds
+    # translate the geometries to honor the page_format and center argument
     bounds = vector_data.bounds()
     if page_format != "tight":
         size = tuple(c * 96.0 / 25.4 for c in PAGE_FORMATS[page_format])
@@ -96,11 +106,39 @@ def write(
     else:
         corrected_vector_data = vector_data
 
-    # output SVG
+    # infer format if required
+    if format is None:
+        # infer format
+        _, ext = os.path.splitext(output.name)
+        format = ext.lstrip(".").lower()
+
+    if format == "svg":
+        write_svg(corrected_vector_data, output, size, single_path)
+    elif format == "hpgl":
+        write_hpgl(corrected_vector_data, output, size)
+    else:
+        logging.warning(
+            f"write: format could not be inferred or format unknown '{format}', "
+            "no file created"
+        )
+
+    return vector_data
+
+
+def write_svg(
+    vector_data: VectorData, output, size: Tuple[float, float], single_path: bool,
+) -> None:
+    """
+    Export geometries in SVG format
+    :param vector_data: geometries to export
+    :param output: file object to write to
+    :param size: size of the page in pixel
+    :param single_path: merge all geometries in a single path?
+    """
     dwg = svgwrite.Drawing(size=size, profile="tiny", debug=False)
     dwg.attribs["xmlns:inkscape"] = "http://www.inkscape.org/namespaces/inkscape"
-    for layer_id in sorted(corrected_vector_data.layers.keys()):
-        layer = corrected_vector_data.layers[layer_id]
+    for layer_id in sorted(vector_data.layers.keys()):
+        layer = vector_data.layers[layer_id]
 
         group = dwg.g(style="display:inline", id=f"layer{layer_id}")
         group.attribs["inkscape:groupmode"] = "layer"
@@ -130,4 +168,52 @@ def write(
         dwg.add(group)
 
     dwg.write(output, pretty=True)
-    return vector_data
+
+
+def write_hpgl(vector_data: VectorData, output, size: Tuple[float, float]) -> None:
+    """
+    Export geometries in SVG format
+    :param vector_data: geometries to export
+    :param output: file object to write to
+    :param size: size of the page in pixel
+    """
+
+    print(size)
+
+    # for plotters A2 and above we need to offset the coords (LL = -309, -210)
+    offset = [-309, -210]
+
+    # scale offset
+    offset = [int(offset[0] / 0.025), int(offset[1] / 0.025)]
+
+    # plotter units in mm
+    scale = 0.025
+
+    hpgl = "IN;DF;\n"
+
+    # this could be determined by the layer number? layer 1 uses pen 1, layer 2 uses pen 2 etc
+    hpgl += "SP1;\n"
+
+    for layer_id in sorted(vector_data.layers.keys()):
+        layer = vector_data.layers[layer_id]
+        for line in layer:
+            # output the first coordinate
+            hpgl += "PU{},{}PD".format(int(as_vector(line)[0][0] / scale) + offset[0], int(as_vector(line)[0][1] / scale) + offset[1])
+            # output second to penulimate coordinates
+            for x, y in as_vector(line)[1:-1]:
+                hpgl+= "{},{},".format(int(x / scale) + offset[0], int(y / scale) + offset[1])
+            # output final coordinate
+            hpgl += "{},{}\n".format(int(as_vector(line)[-1][0] / scale) + offset[0], int(as_vector(line)[-1][1] / scale) + offset[1])
+
+    # put the pen back and leave the plotter in an initialised state
+    hpgl+= "SP0;IN;"
+
+    f = open(output.name, "w+")
+    f.write(hpgl)
+    f.close()
+
+    # purely for debug purposes
+    print(hpgl)
+
+    # TO BE COMPLETED
+    pass
